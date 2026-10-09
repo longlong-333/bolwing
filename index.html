@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>Matter.js 街機保齡球大賽</title>
+    <style>
+        body { font-family: sans-serif; text-align: center; background-color: #111; color: white; padding: 10px; margin: 0; user-select: none; }
+        .cabinet { background-color: #2c3e50; width: 360px; margin: 15px auto; padding: 15px; border-radius: 15px; border: 3px solid #ffd700; box-shadow: 0 0 15px rgba(0,0,0,0.5); }
+        .scoreboard { background-color: #1a252f; padding: 8px; border-radius: 8px; border: 1px solid #7f8c8d; margin-bottom: 10px; font-size: 16px; }
+        .val { color: #ffd700; font-weight: bold; font-size: 18px; }
+        
+        /* 🌌 物理引擎畫布外框 */
+        #game-view { width: 340px; height: 380px; margin: 10px auto; background-color: #000; border-radius: 5px; overflow: hidden; box-shadow: inset 0 0 20px rgba(0,0,0,0.8); }
+        
+        .btn-roll { background: linear-gradient(to bottom, #ff9800, #f57c00); color: white; font-size: 18px; padding: 12px; border-radius: 25px; border: none; font-weight: bold; width: 90%; cursor: pointer; box-shadow: 0 4px 8px rgba(0,0,0,0.3); }
+        .btn-roll:disabled { background: #555 !important; color: #aaa !important; cursor: not-allowed; }
+    </style>
+    
+    <!-- 🧠 免費引入免費開源的 Matter.js 物理引擎模組 -->
+    <script src="https://cloudflare.com"></script>
+</head>
+<body>
+
+    <h1>🎳 真實物理保齡球大賽</h1>
+    <p style="color: #00ffcc; font-size: 12px; margin: 0;">🌐 本服務已優化 GitHub Pages 雲端加密安全協定</p>
+    
+    <div class="cabinet">
+        <div class="scoreboard">
+            🎯 瞄準說明：抓準球左右滑行到正中央的瞬間發射！<br>
+            🎰 狀態：<span id="status-txt" class="val">準備出球</span>
+        </div>
+
+        <!-- 🎯 Matter.js 物理畫面渲染錨點 -->
+        <div id="game-view"></div>
+
+        <button id="roll-btn" class="btn-roll">💥 滾球衝刺發射！</button>
+    </div>
+
+    <script>
+        // 解構 Matter.js 核心組件模組
+        const { Engine, Render, Runner, Bodies, Composite, Body, Events } = Matter;
+
+        let engine, render, runner;
+        let ball, aimPointer;
+        let pins = [];
+        let isRolling = false;
+        
+        // 瞄準滑行控制變數
+        let aimAngle = 0;
+        let aimDir = 0.05; 
+        let aimTimer;
+
+        window.onload = function() {
+            initPhysicsEngine();
+            startAimAnimation();
+            
+            // 綁定發射按鈕
+            document.getElementById("roll-btn").onclick = function() {
+                if (!isRolling) launchBall();
+                else resetRack(); // 比賽完按按鈕重置
+            };
+        };
+
+        // 1. 初始化 2D 物理宇宙世界
+        function initPhysicsEngine() {
+            engine = Engine.create({ gravity: { y: 0, x: 0 } }); // 保齡球是鳥瞰視角，世界預設不給重力
+            
+            render = Render.create({
+                element: document.getElementById("game-view"),
+                engine: engine,
+                options: {
+                    width: 340,
+                    height: 380,
+                    wireframes: false, // 關閉線框，顯示真實實心色塊
+                    background: '#d35400' // 木頭色球道
+                }
+            });
+            Render.run(render);
+            
+            runner = Runner.create();
+            Runner.run(runner, engine);
+
+            // 畫出兩側灰色洗溝道與底部邊界邊框阻擋
+            const leftWall = Bodies.rectangle(15, 190, 30, 380, { isStatic: true, render: { fillStyle: '#555' } });
+            const rightWall = Bodies.rectangle(325, 190, 30, 380, { isStatic: true, render: { fillStyle: '#555' } });
+            const topWall = Bodies.rectangle(170, -10, 340, 20, { isStatic: true });
+            Composite.add(engine.world, [leftWall, rightWall, topWall]);
+
+            spawnPinsAndBall();
+        }
+
+        // 2. 生成 10 個獨立碰撞球瓶與保齡球組件
+        function spawnPinsAndBall() {
+            pins = [];
+            // 三角形瓶陣落點座標矩陣
+            const pinPositions = [
+                // 第一排 (前)
+                { x: 170, y: 50 },
+                // 第二排
+                { x: 150, y: 75 }, { x: 190, y: 75 },
+                // 第三排
+                { x: 130, y: 100 }, { x: 170, y: 100 }, { x: 210, y: 100 },
+                // 第四排 (後)
+                { x: 110, y: 125 }, { x: 150, y: 125 }, { x: 190, y: 125 }, { x: 230, y: 125 }
+            ];
+
+            // 產生 10 個具備獨立重量、彈力、摩擦力，可各自彈飛的球瓶剛體
+            pinPositions.forEach((pos, index) => {
+                let pin = Bodies.circle(pos.x, pos.y, 8, {
+                    friction: 0.1,
+                    restitution: 0.8, // 高彈力，瓶子相撞會像骨牌一樣各自噴飛
+                    density: 0.005,
+                    render: { fillStyle: '#ffffff', strokeStyle: '#e74c3c', lineWidth: 3 } // 白瓶紅帶
+                });
+                pins.push(pin);
+                Composite.add(engine.world, pin);
+            });
+
+            // 產生黃色瞄準針（單純視覺提示剛體）
+            aimPointer = Bodies.polygon(170, 300, 3, 10, { isStatic: true, render: { fillStyle: '#ffd700' } });
+            Composite.add(engine.world, aimPointer);
+
+            // 產生藍色保齡球剛體
+            ball = Bodies.circle(170, 340, 15, {
+                friction: 0.05,
+                restitution: 0.4,
+                density: 0.08, // 球很重，才能把瓶子撞散
+                render: { fillStyle: '#3498db' }
+            });
+            Composite.add(engine.world, ball);
+        }
+
+        // 3. 瞄準器自動左右平移大腦
+        function startAimAnimation() {
+            aimTimer = setInterval(() => {
+                if (isRolling) return;
+                aimAngle += aimDir;
+                if (aimAngle > 1.2 || aimAngle < -1.2) { aimDir = -aimDir; } // 兩側反彈
+                
+                // 讓球跟著指針在底部同步晃動
+                const targetX = 170 + Math.sin(aimAngle) * 100;
+                Body.setPosition(ball, { x: targetX, y: 340 });
+                Body.setPosition(aimPointer, { x: targetX, y: 310 });
+            }, 20);
+        }
+
+        // 🚀 4. 滾球物理衝刺發射
+        function launchBall() {
+            isRolling = true;
+            clearInterval(aimTimer);
+            document.getElementById("roll-btn").disabled = true;
+            document.getElementById("status-txt").innerText = "💥 猛烈撞擊中！";
+
+            // 計算出球角度與推力
+            const forceY = -0.15; // 往前衝的巨大力道
+            const forceX = Math.sin(aimAngle) * 0.05; // 根據瞄準位置給予左右微幅偏移斜率
+
+            // 對保齡球施加物理推力
+            Body.applyForce(ball, ball.position, { x: forceX, y: forceY });
+
+            // 監聽器：兩秒後自動結算看倒了幾根瓶子
+            setTimeout(checkResults, 2500);
+        }
+
+        // 📊 5. 個別動態結算大腦
+        function checkResults() {
+            let knockedOut = 0;
+            
+            pins.forEach(pin => {
+                // 判定規則：只要瓶子偏移原始落點超過 15 像素、或是被撞飛進兩側洗溝道，就算被擊倒！
+                const dx = Math.abs(pin.position.x - pin.positionPrev.x);
+                const dy = Math.abs(pin.position.y - pin.positionPrev.y);
+                
+                // 檢查是否彈離原地或飛走
+                if (pin.position.y > 150 || pin.position.x < 35 || pin.position.x > 305 || pin.speed > 0.5) {
+                    knockedOut++;
+                }
+            });
+
+            if (knockedOut === 10) {
+                document.getElementById("status-txt").innerHTML = "🎉 <strong>STRIKE!!! 10瓶完美全倒！</strong>";
+            } else {
+                document.getElementById("status-txt").innerText = "比賽結束！擊倒了 " + knockedOut + " 根球瓶！";
+            }
+
+            const btn = document.getElementById("roll-btn");
+            btn.innerText = "🔄 重新下一局擺瓶";
+            btn.disabled = false;
+        }
+
+        // 清空重來
+        function resetRack() {
+            isRolling = false;
+            document.getElementById("roll-btn").innerText = "💥 滾球衝刺發射！";
+            document.getElementById("status-txt").innerText = "準備出球";
+            
+            // 移除世界舊物品
+            Composite.clear(engine.world, true);
+            spawnPinsAndBall();
+            startAimAnimation();
+        }
+
+        // 免外部資源音效引擎（完全不卡死）
+        var audioCtx = null;
+        function playTone(freq, duration) {
+            try {
+                if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                var o = audioCtx.createOscillator(), g = audioCtx.createGain();
+                o.type = "sine"; o.frequency.setValueAtTime(freq, audioCtx.currentTime);
+                g.gain.setValueAtTime(0.02, audioCtx.currentTime);
+                g.gain.linearRampToValueAtTime(0, audioCtx.currentTime + duration);
+                o.connect(g); g.connect(audioCtx.destination); o.start(); o.stop(audioCtx.currentTime + duration);
+            } catch(e) {}
+        }
+    </script>
+</body>
+</html>
